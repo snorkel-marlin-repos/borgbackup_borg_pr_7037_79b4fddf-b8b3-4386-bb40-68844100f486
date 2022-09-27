@@ -1,0 +1,134 @@
+# badge: https://github.com/borgbackup/borg/workflows/CI/badge.svg?branch=master
+
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+    - '**.py'
+    - '**.pyx'
+    - '**.c'
+    - '**.h'
+    - '**.yml'
+    - '**.cfg'
+    - '**.ini'
+    - 'requirements.d/*'
+    - '!docs/**'
+  pull_request:
+    branches: [ master, borg2 ]
+    paths:
+    - '**.py'
+    - '**.pyx'
+    - '**.c'
+    - '**.h'
+    - '**.yml'
+    - '**.cfg'
+    - '**.ini'
+    - 'requirements.d/*'
+    - '!docs/**'
+
+jobs:
+  lint:
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.9
+    - name: Lint with flake8
+      run: |
+        pip install flake8
+        flake8 src scripts conftest.py
+
+  tox:
+
+    needs: lint
+    strategy:
+      matrix:
+        include:
+            - os: ubuntu-20.04
+              python-version: '3.9'
+              toxenv: mypy
+            - os: ubuntu-20.04
+              python-version: '3.9'
+              toxenv: py39-fuse2
+            - os: ubuntu-20.04
+              python-version: '3.10'
+              toxenv: py310-fuse3
+            - os: ubuntu-20.04
+              python-version: '3.11-dev'
+              toxenv: py311-fuse2
+            - os: macos-12
+              python-version: '3.9'
+              toxenv: py39-none  # note: no fuse testing, due to #6099, see also #6196.
+
+    env:
+      # Configure pkg-config to use OpenSSL from Homebrew
+      PKG_CONFIG_PATH: /usr/local/opt/openssl@1.1/lib/pkgconfig
+      TOXENV: ${{ matrix.toxenv }}
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        # just fetching 1 commit is not enough for setuptools-scm, so we fetch all
+        fetch-depth: 0
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Cache pip
+      uses: actions/cache@v2
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.d/development.txt') }}
+        restore-keys: |
+            ${{ runner.os }}-pip-
+            ${{ runner.os }}-
+
+    - name: Install Linux packages
+      if: ${{ runner.os == 'Linux' }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config build-essential
+        sudo apt-get install -y libssl-dev libacl1-dev libxxhash-dev liblz4-dev libzstd-dev
+        sudo apt-get install -y libfuse-dev fuse || true  # Required for Python llfuse module
+        sudo apt-get install -y libfuse3-dev fuse3 || true  # Required for Python pyfuse3 module
+
+    - name: Install macOS packages
+      if: ${{ runner.os == 'macOS' }}
+      run: |
+        brew install pkg-config || brew upgrade pkg-config
+        brew install zstd || brew upgrade zstd
+        brew install lz4 || brew upgrade lz4
+        brew install xxhash || brew upgrade xxhash
+        brew install openssl@1.1 || brew upgrade openssl@1.1
+
+    - name: Install Python requirements
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -r requirements.d/development.txt
+    - name: Install borgbackup
+      run: |
+        # pip install -e .
+        python setup.py -v develop
+    - name: run tox env
+      run: |
+        # do not use fakeroot, but run as root. avoids the dreaded EISDIR sporadic failures. see #2482.
+        #sudo -E bash -c "tox -e py"
+        tox --skip-missing-interpreters
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v1
+      env:
+        OS: ${{ runner.os }}
+        python: ${{ matrix.python-version }}
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        env_vars: OS, python
